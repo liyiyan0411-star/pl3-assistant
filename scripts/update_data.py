@@ -1,67 +1,95 @@
 #!/usr/bin/env python3
-"""Fetch verified history of Sporttery PL3; fail closed without modifying existing data."""
-import json, re, time, pathlib, urllib.request, datetime
+"""体彩排列3：抓取近100期历史页，并核对甘肃省体彩最新期次。失败不覆盖旧数据。"""
+import datetime as dt
+import json
+import pathlib
+import re
+import urllib.request
+from html.parser import HTMLParser
 
-ROOT=pathlib.Path(__file__).resolve().parents[1]
-API='https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry?gameNo=35&provinceId=0&pageSize=100&isVerify=1&pageNo=1'
-HEADERS={'User-Agent':'Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36','Referer':'https://m.lottery.gov.cn/','Accept':'application/json, text/plain, */*'}
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+FILE = ROOT / 'data.json'  # 前端读取这个名字；工作流也必须提交这个名字
+PAGES = ['https://www.ydniu.com/open/pl3-100.html'] + [f'https://www.ydniu.com/open/pl3-100/{x}.html' for x in range(2, 5)]
+VERIFY_URL = 'https://www.gstc.org.cn/wanfa/pl3_history'
+UA = {'User-Agent': 'Mozilla/5.0 (compatible; PL3HistoryChecker/1.0; +https://github.com/)','Accept': 'text/html,application/xhtml+xml'}
 
-def candidates(node):
-    found=[]
-    if isinstance(node,dict):
-        num=node.get('lotteryDrawNum'); val=node.get('lotteryDrawResult'); day=node.get('lotteryDrawTime') or node.get('lotteryDrawDate') or ''
-        if num is not None and val is not None:
-            found.append((str(num),str(val),str(day)))
-        for x in node.values(): found+=candidates(x)
-    elif isinstance(node,list):
-        for x in node: found+=candidates(x)
-    return found
+class Rows(HTMLParser):
+    def __init__(self): super().__init__(); self.rows=[]; self.cells=[]; self.cell=None; self.inrow=False
+    def handle_starttag(self, tag, attrs):
+        if tag=='tr': self.inrow=True; self.cells=[]
+        if self.inrow and tag in ('td','th'): self.cell=[]
+    def handle_data(self, text):
+        if self.cell is not None: self.cell.append(text)
+    def handle_endtag(self, tag):
+        if tag in ('td','th') and self.cell is not None:
+            self.cells.append(' '.join(''.join(self.cell).split())); self.cell=None
+        if tag=='tr' and self.inrow:
+            self.rows.append(self.cells);self.inrow=False
 
-def normalize(items):
-    out={}
-    for period,number,day in items:
-        p=re.search(r'(\d{5})$',period)
-        ds=re.findall(r'\d',number)
-        if not p or len(ds)!=3:continue
-        period=p.group(1)
-        if int(period[2:])<1 or int(period[2:])>366:continue
-        if period in out and out[period]['number']!=''.join(ds):raise ValueError('conflicting issue '+period)
-        out[period]={'period':period,'number':''.join(ds),'date':str(day)[:10] if re.match(r'^20\d\d-\d\d-\d\d',str(day)) else ''}
-    return sorted(out.values(),key=lambda x:int(x['period']),reverse=True)[:100]
+def fetch(url):
+    req=urllib.request.Request(url,headers=UA)
+    with urllib.request.urlopen(req,timeout=22) as resp:
+        return resp.read(2_000_000).decode('utf-8','replace')
 
-rows=[]
-for attempt in range(3):
+def parse_history(html):
+    h=Rows();h.feed(html); out=[]
+    for cells in h.rows:
+        line=' | '.join(cells)
+        match=re.search(r'\b(20\d{5})\b',line)
+        date=re.search(r'\b(20\d{2}-\d{2}-\d{2})\b',line)
+        if not (match and date):continue
+        ix=next((i for i,c in enumerate(cells) if match.group(1) in c),-1)
+        if ix<0:continue
+        # 中奖号码是日期之后的第一个独立三位数或三个单字数字段，不碰试机号
+        position=next((i for i,c in enumerate(cells) if date.group(1) in c),-1)
+        number=None
+        for c in cells[position+1:position+3]:
+            digits=re.findall(r'(?<!\d)\d(?!\d)',c)
+            if len(digits)==3: number=''.join(digits);break
+            if re.fullmatch(r'\d{3}',c):number=c;break
+        if number:
+            out.append({'period':match.group(1)[2:],'date':date.group(1),'number':number})
+    return out
+
+def official_sample(html):
+    # 甘肃页面含：2026-10-22 26281 983
+    return {p:n for _,p,n in re.findall(r'\b(20\d\d-\d\d-\d\d)\s+(\d{5})\s+(\d{3})\b',re.sub('<[^>]+>',' ',html))}
+
+def main():
+    rows={}
+    for url in PAGES:
+        parsed=parse_history(fetch(url));print(url, len(parsed),'rows')
+        if len(parsed)<8: raise RuntimeError('History layout changed: '+url)
+        for row in parsed:
+            prev=rows.get(row['period'])
+            if prev and prev!=row:raise RuntimeError('Conflict in history: '+row['period'])
+            rows[row['period']]=row
+    new=sorted(rows.values(),key=lambda x:int(x['period']),reverse=True)[:100]
+    if len(new)!=100:raise RuntimeError(f'Only {len(new)} rows; existing data retained')
     try:
-        req=urllib.request.Request(API,headers=HEADERS)
-        with urllib.request.urlopen(req,timeout=25) as response:
-            raw=response.read(3_000_000).decode('utf-8','replace')
-        obj=json.loads(raw)
-        rows=normalize(candidates(obj))
-        if len(rows)>=30:break
-        raise ValueError(f'Only {len(rows)} parsed rows')
-    except Exception as exc:
-        print('attempt',attempt+1,repr(exc))
-        if attempt<2:time.sleep(4*(attempt+1))
-else:raise RuntimeError('Source unavailable; old data.json is preserved')
+        checks=official_sample(fetch(VERIFY_URL))
+        print('Gansu official records:',len(checks))
+        if len(checks)<10:raise RuntimeError('Official cross-check unavailable')
+        overlaps=0
+        for r in new:
+            if r['period'] in checks:
+                overlaps+=1
+                if checks[r['period']]!=r['number']:raise RuntimeError('Official mismatch at '+r['period'])
+        if overlaps<10:raise RuntimeError('No sufficient overlap with provincial source')
+    except Exception as e:
+        raise RuntimeError('Provincial verification failed; old file retained: '+str(e))
+    if FILE.exists():
+        old=json.loads(FILE.read_text('utf-8'))
+        existing={r['period']:r['number'] for r in old.get('draws',[])}
+        if existing and int(new[0]['period'])<max(map(int,existing)):
+            raise RuntimeError('Downloaded source is older than saved file')
+        for r in new:
+            if r['period'] in existing and existing[r['period']]!=r['number']:
+                raise RuntimeError('History conflict '+r['period'])
+        if old.get('draws')==new:
+            print('100 draws unchanged');return
+    data={'game':'中国体育彩票排列3','source':'一定牛历史数据，经甘肃省体彩最新记录交叉核对','source_url':PAGES[0],'checked_against':VERIFY_URL,'fetched_at':dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),'draws':new}
+    FILE.write_text(json.dumps(data,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+    print('Saved 100 records, latest:',new[0])
 
-old_path=ROOT/'data.json'
-if old_path.exists():
-    try:
-        old=json.loads(old_path.read_text('utf-8'))
-        oldrows={i['period']:i['number'] for i in old.get('draws',[])}
-        for i in rows:
-            if i['period'] in oldrows and oldrows[i['period']]!=i['number']:
-                raise ValueError(f"Conflicting official data for {i['period']}; review manually")
-        if oldrows and int(rows[0]['period'])<max(map(int,oldrows)):
-            raise ValueError('Source is older than stored data')
-    except (ValueError,KeyError) as exc:raise
-
-payload={'game':'中国体育彩票排列3','source':'中国体育彩票历史开奖接口','source_url':API.split('?')[0],'fetched_at':datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),'draws':rows}
-old=None
-if old_path.exists():
-    try:old=json.loads(old_path.read_text('utf-8'))
-    except json.JSONDecodeError:pass
-if old and old.get('draws')==rows:
-    print('No new draws; preserving original fetched_at');exit(0)
-old_path.write_text(json.dumps(payload,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-print('Saved',len(rows),'records; latest',rows[0])
+if __name__=='__main__':main()
