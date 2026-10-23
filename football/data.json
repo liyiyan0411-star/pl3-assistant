@@ -1,0 +1,6 @@
+{
+  "updated_at": "2026-10-23T11:07:16.247660+00:00",
+  "source": "football-data.org + The Odds API（按已配置接口）",
+  "message": "未配置 FOOTBALL_DATA_TOKEN；未配置 ODDS_API_KEY，赔率字段将为空。赔率并非中国竞彩足球官方固定奖金。",
+  "fixtures": []
+}
