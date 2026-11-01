@@ -5,8 +5,13 @@
   "verification": "甘肃省体彩网交叉核验20期一致",
   "verified_count": 20,
   "verification_url": "https://www.gstc.org.cn/wanfa/pl3_history",
-  "fetched_at": "2026-10-31T14:48:23+00:00",
+  "fetched_at": "2026-11-01T14:50:28+00:00",
   "draws": [
+    {
+      "period": "26291",
+      "date": "2026-11-01",
+      "number": "276"
+    },
     {
       "period": "26290",
       "date": "2026-10-31",
@@ -501,11 +506,6 @@
       "period": "26192",
       "date": "2026-07-21",
       "number": "306"
-    },
-    {
-      "period": "26191",
-      "date": "2026-07-20",
-      "number": "069"
     }
   ]
 }
